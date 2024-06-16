@@ -141,6 +141,20 @@ class PNG:
     
     def decompress(self):
         data = zlib.decompress(''.join(self.data))
-        self.data = np.fromstring(data, dtype = np.uint8)
+        data = np.fromstring(data, dtype = np.uint8)
+        data = data.reshape(self.ihdr.height, (self.ihdr.width * 4) + 1)
         
-        print self.data.shape
+        data = data[:, 1:]
+        data = data.reshape(self.ihdr.height, self.ihdr.width, 4)
+        print data.shape
+        
+        # convert to RGBA
+        img_data = np.zeros((self.ihdr.height, self.ihdr.width, 3), dtype = np.uint8)
+        img_data[:, :, 0] = data[:, :, 0]
+        img_data[:, :, 1] = data[:, :, 1]
+        img_data[:, :, 2] = data[:, :, 2]
+        
+        
+        import matplotlib.pyplot as plt
+        plt.imshow(img_data)
+        plt.show()
