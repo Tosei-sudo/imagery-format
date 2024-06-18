@@ -1,7 +1,8 @@
-# coding : utf-8
+# coding: utf-8
 import struct
 import zlib
 import numpy as np
+import warnings
 
 class FileHeader:
     def read(self, file):
@@ -18,12 +19,24 @@ class IHDR:
         self.type = file.read(4)
         self.width = struct.unpack('>I', file.read(4))[0]
         self.height = struct.unpack('>I', file.read(4))[0]
-        self.bit_depth = file.read(1)
-        self.color_type = file.read(1)
+        self.bit_depth = ord(file.read(1))
+        self.color_type = ord(file.read(1))
         self.compression_method = ord(file.read(1))
         self.filter_method = ord(file.read(1))
         self.interlace_method = ord(file.read(1))
         self.crc = struct.unpack('>I', file.read(4))[0]
+
+    def get_bit_per_pixel(self):
+        if self.color_type == 0:
+            return self.bit_depth
+        elif self.color_type == 2:
+            return self.bit_depth * 3
+        elif self.color_type == 3:
+            return self.bit_depth
+        elif self.color_type == 4:
+            return self.bit_depth * 2
+        elif self.color_type == 6:
+            return self.bit_depth * 4
 
 class gAMA:
     def read(self, file):
@@ -88,13 +101,25 @@ class IDAT:
         self.data = file.read(self.length)
         self.crc = struct.unpack('>I', file.read(4))[0]
         
+class PLTE:
+    def read(self, file):
+        self.length = struct.unpack('>I', file.read(4))[0]
+        self.type = file.read(4)
+        
+        self.palette = []
+        for i in range(0, self.length / 3):
+            self.palette.append(struct.unpack('>BBB', file.read(3)))
+        self.palette = np.array(self.palette)
+        
+        self.crc = struct.unpack('>I', file.read(4))[0]
+        
 class Chunk:
     def read(self, file):
         self.length = struct.unpack('>I', file.read(4))[0]
         self.type = file.read(4)
         self.data = file.read(self.length)
         self.crc = struct.unpack('>I', file.read(4))[0]
-        
+
 class PNG:
     def read(self, file):
         self.header = FileHeader()
@@ -112,6 +137,9 @@ class PNG:
             elif chunk_type == b'gAMA':
                 chunk = gAMA()
                 self.gAMA = chunk
+            elif chunk_type == b'PLTE':
+                chunk = PLTE()
+                self.plte = chunk
             elif chunk_type == b'cHRM':
                 chunk = cHRM()
                 self.cHRM = chunk
@@ -139,21 +167,72 @@ class PNG:
         
         self.decompress()
     
+    def paeth_predictor(self, a, b, c):
+        p = a + b - c
+        pa = abs(p - a)
+        pb = abs(p - b)
+        pc = abs(p - c)
+        
+        if pa <= pb and pa <= pc:
+            return a
+        elif pb <= pc:
+            return b
+        else:
+            return c
+    
+    def reverse_filter(self, img_data, bit_per_pixel):
+        warnings.simplefilter('ignore')
+        
+        byte_per_pixel = bit_per_pixel / 8
+        filtered_data = np.zeros((img_data.shape[0], img_data.shape[1] - 1), dtype = np.uint8)
+        last_scan_data = np.zeros((1, img_data.shape[1] - 1), dtype = np.uint8)
+        
+        for row in range(0, len(img_data)):
+            
+            filter_type = img_data[row][0]
+            scan_data = img_data[row][1:]
+            
+            if filter_type == 1:
+                # 差分フィルタ
+                for (col, data) in enumerate(scan_data):
+                    left = scan_data[col - byte_per_pixel] if col >= byte_per_pixel else 0
+                    scan_data[col] = data + left
+            elif filter_type == 2:
+                # 縦フィルタ
+                scan_data = scan_data.astype(last_scan_data.dtype) + last_scan_data
+            elif filter_type == 3:
+                # 平均フィルタ
+                for (col, up) in enumerate(last_scan_data):
+                    left = scan_data[col - byte_per_pixel] if col > (byte_per_pixel - 1) else 0
+                    scan_data[col] += ((up + left) / 2)
+            elif filter_type == 4:
+                for (col, up) in enumerate(last_scan_data):
+                    left = scan_data[col - byte_per_pixel] if col >= byte_per_pixel else 0
+                    up_left = last_scan_data[col - byte_per_pixel] if row > 0 and col >= byte_per_pixel else 0
+                    scan_data[col] += self.paeth_predictor(up, left, up_left)
+            
+            scan_data = (scan_data % 256)
+            
+            last_scan_data = scan_data
+            filtered_data[row] = scan_data
+        return filtered_data
+    
     def decompress(self):
         data = zlib.decompress(''.join(self.data))
-        data = np.fromstring(data, dtype = np.uint8)
-        data = data.reshape(self.ihdr.height, (self.ihdr.width * 4) + 1)
         
-        data = data[:, 1:]
-        data = data.reshape(self.ihdr.height, self.ihdr.width, 4)
-        print data.shape
+        bit_per_pixel = self.ihdr.get_bit_per_pixel()
+        row_size = 1 + (bit_per_pixel * self.ihdr.width) / 8
         
-        # convert to RGBA
-        img_data = np.zeros((self.ihdr.height, self.ihdr.width, 3), dtype = np.uint8)
-        img_data[:, :, 0] = data[:, :, 0]
-        img_data[:, :, 1] = data[:, :, 1]
-        img_data[:, :, 2] = data[:, :, 2]
-        
+        data = np.fromstring(data, dtype = np.uint8).reshape(self.ihdr.height, row_size)
+        img_data = self.reverse_filter(data, bit_per_pixel)
+
+        if self.ihdr.color_type == 2:
+            img_data = img_data.reshape(self.ihdr.height, self.ihdr.width, 3)
+        elif self.ihdr.color_type == 3:
+            palette = self.plte.palette
+            img_data = palette[img_data]
+        elif self.ihdr.color_type == 6:
+            img_data = img_data.reshape(self.ihdr.height, self.ihdr.width, 4)
         
         import matplotlib.pyplot as plt
         plt.imshow(img_data)

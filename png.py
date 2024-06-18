@@ -3,7 +3,7 @@
 from format.dummy import File
 from format.png import PNG
 
-with open('sample/cat2.png', 'rb') as file:
+with open('sample/sample2.png', 'rb') as file:
     data = File(file.read())
 
 instance = PNG()
